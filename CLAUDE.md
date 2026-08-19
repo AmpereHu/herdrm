@@ -12,21 +12,38 @@
 
 - `Packages/HerdrKit` — SPM 函式庫：NDJSON over Unix socket 的 RPC（`SocketRPC`）、
   資料模型、`SSHTunnel`（OpenSSH `-L local.sock:remote.sock` 轉送）、`Device`／`DeviceStore`
-  （保存於 `~/Library/Application Support/HerdrM/devices.json`）、`HerdrService` 外觀層。
+  （保存於 `~/Library/Application Support/HerdrM/devices.json`）、`HerdrService` 外觀層，
+  以及 `ConsoleLogic`／`TerminalText`。
 - `Sources/HerdrM` — SwiftUI 應用程式（XcodeGen `project.yml`），內嵌 SwiftTerm 終端機。
 - `design/` — 設計畫布的工作檔（`*.dc.html` 畫板 + `canvas.json`）。
+
+### 兩個值得先知道的地方
+
+- **`ConsoleLogic`（HerdrKit）** — 側邊欄排序、⌘K 比對、通知轉換判斷與重連退避都
+  住在這裡：純函式、不碰 `@MainActor`、不需要伺服器，所以測得到。新的排序或過濾
+  規則請加在這裡，不要寫回 `AppModel`。
+- **`TerminalSessionStore`（App）** — 保活中的 `herdr agent attach` 程序與它們的
+  SwiftTerm view，讓切換代理人不必重開程序。刻意只留 2 個背景終端機、逾時 45 秒：
+  herdr 會把仍附掛的 pane 視為你正在看而壓下它的完成通知，所以離開太久的 pane
+  必須放掉。
 
 ## 建置與測試
 
 ```sh
 make build      # xcodegen + xcodebuild → build/Build/Products/Debug/HerdrM.app
 make run
-make kit-test   # HerdrKit 整合測試（需要本機有執行中的 herdr）
+make kit-test   # HerdrKit 測試（整合測試需要本機有執行中的 herdr，沒有就自行 skip）
 HERDRM_E2E_SSH_TARGET=vincent@10.10.10.87 make kit-test   # 另外跑遠端 SSH E2E 測試
 ```
 
 xcodebuild 需要加上 `-skipPackagePluginValidation`（SwiftTerm 內含一個 build plugin），
 Makefile 已經帶上這個參數。
+
+`.github/workflows/ci.yml` 會在每次 push 與 PR 上以未簽章方式建置 App 並跑
+`swift test`。測試分兩類：`WireFormatTests`／`ConsoleLogicTests` 是離線的（wire
+format、模型解碼、排序與通知規則），`LocalSocketTests`／`RemoteSSHTests` 需要真實
+的 herdr 或 SSH 目標，缺少時會自行 skip。動到 JSON 欄位名或排序規則時，請一併補
+離線測試 —— 那是唯一在 CI 上真正會擋下問題的部分。
 
 ## 發佈
 
@@ -54,6 +71,13 @@ OwO-Network/homebrew-brew 裡的 cask 會在每次發佈後自動更新版本。
   接管該 pane）。遠端裝置是透過 `ssh -tt` 執行並在前面補上 PATH（`sshd` 執行的不是
   login shell；herdr 在 macOS 主機上位於 `/opt/homebrew/bin`）。
 - 代理人狀態分組的排序是 Blocked > Done > Working > Idle（與 Heeler 一致）。
+- `snapshot.panes` 包含沒有代理人的純 shell pane；側邊欄的 Terminals 分組就是它，
+  attach 走的是同一條 `herdr agent attach <pane_id>` 路徑。
+- 回覆被卡住的代理人是用 `pane.send_input` 再送一個 `enter` 鍵，而不是
+  `agent.prompt`：pane id 是 App 本來就握有的識別，`agent.prompt` 的 target
+  選擇器語意尚未對照實際 socket 驗證過。
+- 所有 ssh（socket 轉送、探測、終端機 attach）都帶 `ControlMaster=auto` 與共用的
+  `ControlPath`，因此一台遠端裝置只會有一次握手成本。
 
 參考用的 repo：`~/Projects/herdr`（伺服器原始碼）、`~/Projects/Heeler`（iOS 用戶端，
 共用同一套領域模型）、`~/Projects/waku`（側邊欄設計參考）。
