@@ -1,67 +1,62 @@
-# Changelog
+# 變更紀錄
 
-All notable changes to herdrm are documented in this file. The format is based
-on [Keep a Changelog](https://keepachangelog.com); versions follow semver.
-Release automation extracts the matching section for GitHub release notes and
-the Sparkle update description — a release without a section here fails CI.
+herdrm 所有值得記錄的變更都寫在這個檔案裡。格式參考
+[Keep a Changelog](https://keepachangelog.com)；版本號遵循 semver。
+發佈自動化流程會擷取對應版本的段落，作為 GitHub release 說明與 Sparkle 的更新描述 —
+沒有對應段落的版本會讓 CI 失敗。
 
 ## [Unreleased]
 
 ## [0.2.3] - 2026-08-19
 
-### Added
-- Spaces can now be renamed from the sidebar context menu. (#6, thanks
-  @hhmy27!)
+### 新增
+- 現在可以從側邊欄的右鍵選單重新命名 space。（#6，感謝 @hhmy27！）
 
 ## [0.2.2] - 2026-08-19
 
-### Added
-- Terminal settings: "Mouse reporting" toggle — turn it off to always select
-  text with the mouse even in TUIs that capture the mouse (Shift-drag selects
-  either way). (#2, #5)
+### 新增
+- 終端機設定新增「Mouse reporting」開關 — 關掉之後，即使在會攔截滑鼠的 TUI 裡也
+  一律能用滑鼠選取文字（不論開關狀態，Shift + 拖曳都可以選取）。（#2、#5）
 
-### Fixed
-- The terminal now re-renders immediately when the app theme changes. (#4)
+### 修正
+- App 主題切換時，終端機現在會立即重新繪製。（#4）
 
 ## [0.2.1] - 2026-08-19
 
-### Fixed
-- OS detection for newly added devices now retries on every successful
-  connection instead of only once at add time, and SSH auto-accepts unknown
-  host keys (`accept-new`) so a fresh device's first connection no longer
-  fails before you've ssh'd to it manually.
+### 修正
+- 新增裝置的作業系統偵測改為每次連線成功時都重試，而不是只在加入裝置當下試一次；
+  另外 SSH 會自動接受未知的主機金鑰（`accept-new`），所以新裝置第一次連線不會再因為
+  你還沒手動 ssh 過去而失敗。
 
 ## [0.2.0] - 2026-08-19
 
-### Added
-- All devices now stay connected in parallel: the sidebar aggregates spaces and
-  agents across every machine, with a small OS badge marking where each row
-  lives. The bottom-left switcher became a filter (All Devices by default).
-- Notifications now watch every connected device, not just the selected one;
-  clicking a notification jumps straight to that agent.
-- New Agent and New Space gained a device picker; installed-agent sniffing is
-  cached per device.
-- Per-device connection health with automatic reconnect (1s → 30s backoff).
+### 新增
+- 所有裝置現在都會同時保持連線：側邊欄會匯總每一台機器上的 space 與代理人，
+  並用一個小的作業系統徽章標示每一列所屬的機器。左下角的切換器改成了過濾器
+  （預設為 All Devices）。
+- 通知現在會監看每一個已連線的裝置，而不只是目前選取的那一台；點擊通知會直接跳到
+  該代理人。
+- New Agent 與 New Space 加上了裝置選擇器；已安裝代理人的偵測結果會依裝置快取。
+- 每個裝置各自的連線健康狀態與自動重連（1 秒 → 30 秒的退避重試）。
 
-### Changed
-- Search results show device badges and search across all devices.
+### 變更
+- 搜尋結果會顯示裝置徽章，且搜尋範圍涵蓋所有裝置。
 
 ## [0.1.2] - 2026-08-19
 
-### Added
-- New Space now has a directory picker (Browse… locally, `~`-expansion on
-  remote devices) and an optional name field.
+### 新增
+- New Space 現在有目錄選擇器（本機可用「Browse…」，遠端裝置支援 `~` 展開）以及一個
+  選填的名稱欄位。
 
 ## [0.1.1] - 2026-08-19
 
-### Fixed
-- Crash when opening the device switcher on macOS 26+ betas: replaced the
-  NSPopover with an in-window panel (uncaught NSRemoteView exception in
-  ViewBridge).
+### 修正
+- 修正在 macOS 26 以上的 beta 版開啟裝置切換器時會當掉的問題：改用視窗內的面板
+  取代 NSPopover（ViewBridge 中未被攔截的 NSRemoteView 例外）。
 
 ## [0.1.0] - 2026-08-19
 
-### Added
-- Initial release: waku-style sidebar with spaces and agents, device switcher
-  with SSH remotes, SwiftTerm PTY attach, agent sniffing with bypass-mode
-  flags, ⌘K search, Sparkle auto-updates, signed and notarized releases.
+### 新增
+- 首次發佈：waku 風格的側邊欄（含 space 與代理人）、可加入 SSH 遠端主機的裝置切換器、
+  SwiftTerm PTY attach、代理人偵測與略過權限旗標、⌘K 搜尋、Sparkle 自動更新，
+  以及已簽章並公證的發佈版本。
