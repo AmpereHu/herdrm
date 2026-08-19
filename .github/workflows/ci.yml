@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      # Unsigned: CI has no Developer ID certificate (release.yml imports one).
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project HerdrM.xcodeproj -scheme HerdrM \
+            -configuration Debug -derivedDataPath build \
+            -skipPackagePluginValidation \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            build
+
+      # Integration tests skip themselves when no herdr socket is present;
+      # the wire-format and logic tests run everywhere.
+      - name: HerdrKit tests
+        run: swift test --package-path Packages/HerdrKit
