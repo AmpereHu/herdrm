@@ -1,10 +1,15 @@
 import AppKit
+import HerdrKit
 import Sparkle
 import SwiftUI
 
 @main
 struct HerdrMApp: App {
     @AppStorage("app.theme") private var themePreference = "system"
+    @AppStorage("menuBar.enabled") private var menuBarEnabled = true
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    /// Owned here so the window and the menu bar extra observe one model.
+    @StateObject private var model = AppModel()
 
     private let updaterController = SPUStandardUpdaterController(
         startingUpdater: true,
@@ -14,7 +19,7 @@ struct HerdrMApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            RootView(model: model)
                 .onAppear { Self.applyTheme(themePreference) }
                 .onChange(of: themePreference) { _, newValue in
                     Self.applyTheme(newValue)
@@ -28,6 +33,24 @@ struct HerdrMApp: App {
                     updaterController.checkForUpdates(nil)
                 }
             }
+            CommandGroup(after: .newItem) {
+                Button("New Agent…") { model.showNewAgent = true }
+                    .keyboardShortcut("n", modifiers: .command)
+                Button("New Space…") { model.showNewSpace = true }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                Divider()
+                Button("Search…") { model.showSearch = true }
+                    .keyboardShortcut("k", modifiers: .command)
+            }
+        }
+
+        // Agents waiting on you, reachable without bringing the window forward.
+        MenuBarExtra(
+            "herdrm",
+            systemImage: model.blockedCount > 0 ? "bell.badge.fill" : "bell",
+            isInserted: $menuBarEnabled
+        ) {
+            MenuBarContent(model: model)
         }
 
         Settings {
@@ -40,6 +63,55 @@ struct HerdrMApp: App {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
         default: NSApp.appearance = nil
+        }
+    }
+}
+
+/// Menu bar rundown of everything that wants attention, across every device.
+struct MenuBarContent: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        let waiting = model.attentionAgents
+        if waiting.isEmpty {
+            Text("No agents waiting")
+        } else {
+            ForEach(waiting) { entry in
+                Button(label(for: entry)) { open(entry) }
+            }
+        }
+        Divider()
+        Button("New Agent…") {
+            NSApp.activate(ignoringOtherApps: true)
+            model.showNewAgent = true
+        }
+        Button("Open herdrm") {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Divider()
+        Button("Quit herdrm") { NSApp.terminate(nil) }
+            .keyboardShortcut("q", modifiers: .command)
+    }
+
+    private func label(for entry: AppModel.AgentEntry) -> String {
+        let mark = entry.agent.status == .blocked ? "●" : "✓"
+        let space = model.spaceName(deviceID: entry.device.id, workspaceID: entry.agent.workspaceID)
+        let location = model.showsDeviceBadges ? "\(space) · \(entry.device.name)" : space
+        return "\(mark)  \(entry.agent.title) — \(location)"
+    }
+
+    private func open(_ entry: AppModel.AgentEntry) {
+        NSApp.activate(ignoringOtherApps: true)
+        model.reveal(entry.ref)
+    }
+}
+
+/// Detaches every kept-alive terminal on quit, so no `ssh`/`herdr agent attach`
+/// child outlives the app.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            TerminalSessionStore.shared.closeAll()
         }
     }
 }
@@ -121,6 +193,7 @@ struct TerminalSettingsView: View {
 
 struct AppearanceSettingsView: View {
     @AppStorage("app.theme") private var themePreference = "system"
+    @AppStorage("menuBar.enabled") private var menuBarEnabled = true
 
     var body: some View {
         Form {
@@ -131,6 +204,11 @@ struct AppearanceSettingsView: View {
             }
             .pickerStyle(.segmented)
             Text("The terminal follows the app theme.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            Toggle("Show in the menu bar", isOn: $menuBarEnabled)
+            Text("Lists every agent that is blocked or done, on any device.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }

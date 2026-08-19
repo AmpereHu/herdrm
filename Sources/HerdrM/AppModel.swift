@@ -37,7 +37,9 @@ final class AppModel: ObservableObject {
     @Published var deviceFilter: UUID?
     @Published var sessions: [UUID: DeviceSessionState] = [:]
     @Published var selectedSpace: SpaceRef?
-    @Published var selectedPane: PaneRef?
+    @Published var selectedPane: PaneRef? {
+        didSet { rememberSelection() }
+    }
 
     @Published var showAddDevice = false
     @Published var showNewAgent = false
@@ -132,12 +134,7 @@ final class AppModel: ObservableObject {
                 $0.device.id == space.deviceID && $0.agent.workspaceID == space.workspaceID
             }
         }
-        return entries.sorted {
-            if $0.agent.status.sortBucket != $1.agent.status.sortBucket {
-                return $0.agent.status.sortBucket < $1.agent.status.sortBucket
-            }
-            return ($0.agent.revision ?? 0) > ($1.agent.revision ?? 0)
-        }
+        return entries.sorted { ConsoleLogic.sortsBefore($0.agent.orderKey, $1.agent.orderKey) }
     }
 
     var scopeAgentCount: Int {
@@ -185,6 +182,44 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Agents across every device that are waiting on the user, most urgent first.
+    /// Drives the menu bar extra and the Dock badge.
+    var attentionAgents: [AgentEntry] {
+        devices.flatMap { device in
+            session(device.id).agents
+                .filter { $0.status == .blocked || $0.status == .done }
+                .map { AgentEntry(device: device, agent: $0) }
+        }
+        .sorted { ConsoleLogic.sortsBefore($0.agent.orderKey, $1.agent.orderKey) }
+    }
+
+    var blockedCount: Int {
+        devices.reduce(0) { total, device in
+            total + session(device.id).agents.filter { $0.status == .blocked }.count
+        }
+    }
+
+    /// Answers a blocked agent by typing into its pane.
+    ///
+    /// Deliberately `pane.send_input` + an Enter key rather than `agent.prompt`: the pane
+    /// is addressed by an id the app already holds, and herdr encodes the keypress the
+    /// same way the terminal would.
+    func reply(to ref: PaneRef, text: String) {
+        guard let device = device(ref.deviceID) else { return }
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return }
+        Task {
+            do {
+                let service = service(for: device)
+                try await service.sendInput(paneID: ref.paneID, text: message)
+                try await service.sendKeys(paneID: ref.paneID, keys: ["enter"])
+                await refresh(device.id)
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
+    }
+
     /// Jump target used by notification clicks.
     func reveal(_ ref: PaneRef) {
         if let filter = deviceFilter, filter != ref.deviceID {
@@ -198,10 +233,38 @@ final class AppModel: ObservableObject {
 
     func start() {
         NotificationManager.shared.setup(model: self)
+        restoreSelection()
         for device in devices {
             startSession(device)
             probeOSIfNeeded(device)
         }
+    }
+
+    // MARK: - Selection persistence
+
+    private static let selectionKey = "selection.pane"
+
+    /// Remembers which agent was open so relaunching lands back on it instead of on
+    /// whatever happens to sort first. The pane is only really selected once the device
+    /// reports it again; until then `selectedEntry` stays nil and the placeholder shows.
+    func rememberSelection() {
+        if let pane = selectedPane {
+            UserDefaults.standard.set(
+                "\(pane.deviceID.uuidString)|\(pane.paneID)",
+                forKey: Self.selectionKey
+            )
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.selectionKey)
+        }
+    }
+
+    private func restoreSelection() {
+        guard let stored = UserDefaults.standard.string(forKey: Self.selectionKey) else { return }
+        let parts = stored.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let deviceID = UUID(uuidString: parts[0]),
+              devices.contains(where: { $0.id == deviceID })
+        else { return }
+        selectedPane = PaneRef(deviceID: deviceID, paneID: parts[1])
     }
 
     func service(for device: Device) -> HerdrService {
@@ -231,7 +294,7 @@ final class AppModel: ObservableObject {
                     if let current = self.device(device.id) {
                         self.probeOSIfNeeded(current)
                     }
-                    await self.refresh(device.id)
+                    try await self.refreshOrThrow(device.id)
                     if self.sessions[device.id]?.agentKinds.isEmpty ?? true {
                         let kinds = (try? await service.agentKinds()) ?? []
                         self.sessions[device.id]?.agentKinds = kinds
@@ -247,7 +310,7 @@ final class AppModel: ObservableObject {
                 }
                 guard !Task.isCancelled else { return }
                 try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
-                backoff = min(backoff * 2, 30)
+                backoff = ConsoleLogic.nextBackoff(after: backoff)
             }
         }
     }
@@ -300,36 +363,57 @@ final class AppModel: ObservableObject {
 
     // MARK: - Refresh
 
-    func refresh(_ deviceID: UUID) async {
+    /// Snapshot refresh that reports failure to its caller.
+    ///
+    /// Only the session loop calls this: there, a failure really does mean the connection
+    /// is gone, and throwing drops the loop into its reconnect/backoff path.
+    private func refreshOrThrow(_ deviceID: UUID) async throws {
         guard let device = device(deviceID), let service = services[deviceID] else { return }
-        do {
-            let snapshot = try await service.snapshot()
-            notifyTransitions(
-                device: device,
-                from: previousStatuses[deviceID] ?? [:],
-                to: snapshot.agents,
-                workspaces: snapshot.workspaces
-            )
-            previousStatuses[deviceID] = Dictionary(
-                uniqueKeysWithValues: snapshot.agents.map { ($0.paneID, $0.status) }
-            )
-            sessions[deviceID]?.agents = snapshot.agents
-            sessions[deviceID]?.workspaces = snapshot.workspaces
-            sessions[deviceID]?.panes = snapshot.panes ?? []
-            if let selected = selectedPane, selected.deviceID == deviceID,
-               !snapshot.agents.contains(where: { $0.paneID == selected.paneID }) {
-                selectedPane = nil
-            }
-            if let space = selectedSpace, space.deviceID == deviceID,
-               !snapshot.workspaces.contains(where: { $0.workspaceID == space.workspaceID }) {
-                selectedSpace = nil
-            }
-            if selectedPane == nil {
-                selectedPane = visibleAgents.first?.ref
-            }
-        } catch {
-            sessions[deviceID]?.connection = .failed(error.localizedDescription)
+        let snapshot = try await service.snapshot()
+        notifyTransitions(
+            device: device,
+            to: snapshot.agents,
+            workspaces: snapshot.workspaces
+        )
+        previousStatuses[deviceID] = ConsoleLogic.statusMap(snapshot.agents)
+        sessions[deviceID]?.agents = snapshot.agents
+        sessions[deviceID]?.workspaces = snapshot.workspaces
+        sessions[deviceID]?.panes = snapshot.panes ?? []
+        TerminalSessionStore.shared.prune(keeping: livePaneRefs)
+        if let selected = selectedPane, selected.deviceID == deviceID,
+           !snapshot.agents.contains(where: { $0.paneID == selected.paneID }) {
+            selectedPane = nil
         }
+        if let space = selectedSpace, space.deviceID == deviceID,
+           !snapshot.workspaces.contains(where: { $0.workspaceID == space.workspaceID }) {
+            selectedSpace = nil
+        }
+        if selectedPane == nil {
+            selectedPane = visibleAgents.first?.ref
+        }
+    }
+
+    /// Refresh driven by the event stream and by one-off actions.
+    ///
+    /// A single failure here is transient and deliberately does not touch the connection
+    /// state: the stream is still open and the next event refreshes again. If the
+    /// connection really is gone the stream ends and the session loop reconnects —
+    /// flipping to `.failed` from here used to strand the UI in a failed state that
+    /// nothing was retrying.
+    func refresh(_ deviceID: UUID) async {
+        try? await refreshOrThrow(deviceID)
+    }
+
+    /// Every pane the app still knows about, across devices — the set of terminals
+    /// worth keeping alive.
+    private var livePaneRefs: Set<PaneRef> {
+        var refs: Set<PaneRef> = []
+        for device in devices {
+            for agent in session(device.id).agents {
+                refs.insert(PaneRef(deviceID: device.id, paneID: agent.paneID))
+            }
+        }
+        return refs
     }
 
     private func scheduleRefresh(_ deviceID: UUID) {
@@ -345,20 +429,17 @@ final class AppModel: ObservableObject {
     /// while unwatched). Initial snapshots don't notify — only real transitions do.
     private func notifyTransitions(
         device: Device,
-        from previous: [String: AgentStatus],
         to agents: [AgentInfo],
         workspaces: [WorkspaceInfo]
     ) {
-        guard !previous.isEmpty else { return }
-        for agent in agents {
-            guard let old = previous[agent.paneID], old != agent.status else { continue }
-            guard agent.status == .blocked || agent.status == .done else { continue }
+        let previous = previousStatuses[device.id] ?? [:]
+        for agent in ConsoleLogic.notifiable(previous: previous, agents: agents) {
             NotificationManager.shared.post(
                 agent: agent,
                 status: agent.status,
-                deviceID: device.id,
-                deviceName: device.name,
-                spaceName: workspaces.first { $0.workspaceID == agent.workspaceID }?.label ?? agent.workspaceID
+                device: device,
+                spaceName: workspaces.first { $0.workspaceID == agent.workspaceID }?.label ?? agent.workspaceID,
+                service: service(for: device)
             )
         }
     }

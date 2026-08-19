@@ -1,8 +1,10 @@
+import AppKit
 import HerdrKit
 import SwiftUI
 
 struct RootView: View {
-    @StateObject private var model = AppModel()
+    /// Owned by the app scene: the menu bar extra shows the same live state.
+    @ObservedObject var model: AppModel
     // Deliberately not persisted: the app always launches with the sidebar visible.
     @State private var sidebarCollapsed = false
 
@@ -42,15 +44,13 @@ struct RootView: View {
                 .keyboardShortcut("b", modifiers: .command)
                 .hidden()
         )
-        .background(
-            Button("") { model.showSearch = true }
-                .keyboardShortcut("k", modifiers: .command)
-                .hidden()
-        )
         .sheet(isPresented: $model.showSearch) { SearchSheet(model: model) }
         .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 980, minHeight: 620)
         .onAppear { model.start() }
+        .onChange(of: model.blockedCount) { _, count in
+            NSApp.dockTile.badgeLabel = count > 0 ? "\(count)" : nil
+        }
         .sheet(isPresented: $model.showAddDevice) { AddDeviceSheet(model: model) }
         .sheet(isPresented: $model.showNewAgent) { NewAgentSheet(model: model) }
         .sheet(isPresented: $model.showNewSpace) { NewSpaceSheet(model: model) }
@@ -94,6 +94,8 @@ enum TitlebarMetrics {
 struct DetailView: View {
     @ObservedObject var model: AppModel
     @Binding var sidebarCollapsed: Bool
+    /// Kept-alive terminals; observed so a dying attach process surfaces immediately.
+    @StateObject private var terminals = TerminalSessionStore.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -202,17 +204,21 @@ struct DetailView: View {
         if let entry = model.selectedEntry {
             AttachTerminalView(
                 device: entry.device,
-                paneID: entry.agent.paneID,
+                ref: entry.ref,
                 fontName: terminalFontName,
                 fontSize: terminalFontSize,
                 dark: colorScheme == .dark,
                 mouseReporting: terminalMouseReporting
             )
-                .id("attach-\(entry.id)")
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Theme.terminalBackground)
+                .overlay {
+                    if terminals.isDisconnected(entry.ref) {
+                        disconnectedOverlay(entry)
+                    }
+                }
         } else {
             VStack(spacing: 10) {
                 Image(systemName: "terminal")
@@ -231,6 +237,33 @@ struct DetailView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.terminalBackground)
         }
+    }
+
+    /// Shown when the attach process exits — a dropped SSH link, a closed pane, or
+    /// herdr going away. Without it the terminal would just freeze with no explanation.
+    private func disconnectedOverlay(_ entry: AppModel.AgentEntry) -> some View {
+        VStack(spacing: 9) {
+            Image(systemName: "bolt.horizontal.circle")
+                .font(.system(size: 24, weight: .light))
+                .foregroundStyle(Theme.textTertiary)
+            Text("Terminal disconnected")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Theme.text)
+            Text("The attach session for \(entry.agent.title) ended.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.textTertiary)
+            Button("Reconnect") {
+                terminals.reconnect(entry.ref, device: entry.device)
+            }
+            .controlSize(.small)
+        }
+        .padding(22)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Theme.hairline, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.18), radius: 16, y: 6)
     }
 
     private var showsStartAgentShortcut: Bool {

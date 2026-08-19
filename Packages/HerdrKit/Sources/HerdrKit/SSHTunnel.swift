@@ -13,6 +13,40 @@ public actor SSHTunnel {
     public static let remotePathExport =
         "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\""
 
+    /// Directory holding this app's forwarded sockets and control sockets.
+    /// Everything under it must stay short: sockaddr_un caps paths at 104 bytes.
+    static func supportDirectory() -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("herdrm-tunnels", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Stable 64-bit FNV-1a digest of an SSH target, base-36 encoded (~13 chars).
+    /// Swift's `hashValue` is seeded per process, so using it here leaked a fresh socket
+    /// file on every launch and could collide between two devices in the same run.
+    static func token(for target: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in target.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return String(hash, radix: 36)
+    }
+
+    /// Connection multiplexing shared by every ssh this app spawns for a target — the
+    /// socket forward, the probes, and each terminal attach. The first one pays the
+    /// handshake; the rest ride it, which is what makes switching agents on a remote
+    /// device feel local. `ControlPersist` keeps the master briefly after the last user.
+    public static func controlOptions(for target: String) -> [String] {
+        let path = supportDirectory().appendingPathComponent("cm-\(token(for: target))").path
+        return [
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=\(path)",
+            "-o", "ControlPersist=120",
+        ]
+    }
+
     public init(target: String) {
         self.target = target
     }
@@ -51,11 +85,8 @@ public actor SSHTunnel {
         process = nil
 
         let remoteSock = try await remoteSocketPath()
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("herdrm-tunnels", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        // Keep the path short: sockaddr_un caps at 104 bytes.
-        let localSock = dir.appendingPathComponent("\(abs(target.hashValue) % 100_000).sock").path
+        let localSock = Self.supportDirectory()
+            .appendingPathComponent("\(Self.token(for: target)).sock").path
         try? FileManager.default.removeItem(atPath: localSock)
 
         let proc = Process()
@@ -68,6 +99,7 @@ public actor SSHTunnel {
             "-o", "ExitOnForwardFailure=yes",
             "-o", "ServerAliveInterval=15",
             "-o", "StreamLocalBindUnlink=yes",
+        ] + Self.controlOptions(for: target) + [
             "-L", "\(localSock):\(remoteSock)",
             target,
         ]
@@ -123,8 +155,7 @@ public actor SSHTunnel {
                     "-o", "BatchMode=yes",
                     "-o", "StrictHostKeyChecking=accept-new",
                     "-o", "ConnectTimeout=8",
-                    target, command,
-                ]
+                ] + controlOptions(for: target) + [target, command]
                 let out = Pipe()
                 proc.standardOutput = out
                 proc.standardError = FileHandle.nullDevice

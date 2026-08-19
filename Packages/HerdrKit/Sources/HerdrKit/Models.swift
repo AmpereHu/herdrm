@@ -176,7 +176,8 @@ public enum HerdrError: Error, LocalizedError, Sendable {
         case .connectionFailed(let reason): return "connection failed: \(reason)"
         case .rpc(let code, let message): return "herdr error \(code): \(message)"
         case .malformedResponse(let reason): return "malformed response: \(reason)"
-        case .incompatibleProtocol(let version): return "herdr protocol \(version) is too old (need >= 17)"
+        case .incompatibleProtocol(let version):
+            return "herdr protocol \(version) is too old (need >= \(HerdrService.minimumProtocolVersion))"
         case .tunnelFailed(let reason): return "SSH tunnel failed: \(reason)"
         }
     }

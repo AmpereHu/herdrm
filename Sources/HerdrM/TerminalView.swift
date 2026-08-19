@@ -25,10 +25,14 @@ enum TerminalDefaults {
     }
 }
 
-/// Embeds a SwiftTerm terminal running `herdr agent attach` (directly or over ssh).
+/// Hosts whichever kept-alive terminal belongs to the current selection.
+///
+/// The terminal itself lives in `TerminalSessionStore`, so switching agents moves an
+/// already-attached view into this container instead of spawning a new `herdr agent
+/// attach` (and, on a remote device, a new SSH session) every time.
 struct AttachTerminalView: NSViewRepresentable {
     let device: Device
-    let paneID: String
+    let ref: PaneRef
     var fontName: String = ""
     var fontSize: Double = TerminalDefaults.defaultFontSize
     /// From SwiftUI's environment so theme switches re-render immediately.
@@ -37,52 +41,36 @@ struct AttachTerminalView: NSViewRepresentable {
     /// requested mouse reporting (Shift+drag bypasses it either way).
     var mouseReporting: Bool = true
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> TerminalContainerView {
+        TerminalContainerView()
+    }
 
-    func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let view = LocalProcessTerminalView(frame: .zero)
-        view.processDelegate = context.coordinator
-        configureAppearance(view)
-
-        let service = HerdrService(device: device)
-        let command = service.attachCommand(paneID: paneID)
-        var environment = Terminal.getEnvironmentVariables(termName: "xterm-256color")
-        environment.append("LANG=en_US.UTF-8")
-        view.startProcess(
-            executable: command.executable,
-            args: command.args,
-            environment: environment
+    func updateNSView(_ container: TerminalContainerView, context: Context) {
+        let session = TerminalSessionStore.shared.session(for: ref, device: device)
+        session.apply(
+            fontName: fontName,
+            fontSize: fontSize,
+            dark: dark,
+            mouseReporting: mouseReporting
         )
-        return view
+        container.install(session.view)
     }
+}
 
-    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
-        configureAppearance(nsView)
-    }
-
-    private func configureAppearance(_ view: LocalProcessTerminalView) {
-        let font = TerminalDefaults.font(name: fontName, size: fontSize)
-        if view.font != font {
-            view.font = font
+/// Plain container whose only job is to hold one terminal view at a time.
+final class TerminalContainerView: NSView {
+    func install(_ terminal: NSView) {
+        guard terminal.superview !== self else { return }
+        for existing in subviews { existing.removeFromSuperview() }
+        terminal.removeFromSuperview()
+        terminal.frame = bounds
+        terminal.autoresizingMask = [.width, .height]
+        addSubview(terminal)
+        // Typing should land in the terminal straight after a switch. The sheets and the
+        // ⌘K palette run in their own window, so this cannot steal their focus.
+        DispatchQueue.main.async { [weak self, weak terminal] in
+            guard let terminal, terminal.superview === self else { return }
+            self?.window?.makeFirstResponder(terminal)
         }
-        view.allowMouseReporting = mouseReporting
-        let background: NSColor = dark
-            ? NSColor(srgbRed: 0x10 / 255, green: 0x10 / 255, blue: 0x12 / 255, alpha: 1)
-            : .white
-        let foreground: NSColor = dark
-            ? NSColor(srgbRed: 0xD6 / 255, green: 0xD6 / 255, blue: 0xD6 / 255, alpha: 1)
-            : NSColor(srgbRed: 0x3A / 255, green: 0x3A / 255, blue: 0x3A / 255, alpha: 1)
-        if view.nativeBackgroundColor != background {
-            view.nativeBackgroundColor = background
-            view.nativeForegroundColor = foreground
-            view.needsDisplay = true
-        }
-    }
-
-    final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
-        func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-        func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
-        func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-        func processTerminated(source: TerminalView, exitCode: Int32?) {}
     }
 }
