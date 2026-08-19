@@ -104,6 +104,21 @@ struct SidebarView: View {
                                 }
                             }
                     }
+
+                    // Panes herdr is hosting that have no agent in them — the shell a
+                    // space starts with, or one you opened yourself.
+                    if !model.visibleShellPanes.isEmpty {
+                        Spacer().frame(height: 10)
+                        groupHeader("Terminals")
+                        ForEach(model.visibleShellPanes) { entry in
+                            shellRow(entry)
+                                .contextMenu {
+                                    Button("Close Terminal…", role: .destructive) {
+                                        model.requestClosePane(entry.ref, name: entry.title)
+                                    }
+                                }
+                        }
+                    }
                 }
                 .padding(.horizontal, 10)
             }
@@ -250,6 +265,46 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(SidebarRowButtonStyle(selected: selected))
+        // Hovering reads the pane, so the tooltip shows what the agent is actually
+        // doing instead of repeating the row's own title.
+        .help(model.preview(for: entry.ref) ?? agent.title)
+        .onHover { hovering in
+            if hovering { model.previewIfNeeded(entry.ref) }
+        }
+    }
+
+    /// A pane with no agent in it. Selecting one attaches the same embedded terminal.
+    private func shellRow(_ entry: AppModel.PaneEntry) -> some View {
+        let selected = model.selectedPane == entry.ref
+        return Button {
+            model.selectedPane = entry.ref
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(selected ? Theme.textSecondary : Theme.textTertiary)
+                Text(entry.title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(selected ? Theme.text : Theme.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(model.spaceName(deviceID: entry.device.id, workspaceID: entry.pane.workspaceID))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textGhost)
+                    .lineLimit(1)
+                if model.showsDeviceBadges {
+                    deviceBadge(entry.device)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SidebarRowButtonStyle(selected: selected))
+        .help(model.preview(for: entry.ref) ?? entry.title)
+        .onHover { hovering in
+            if hovering { model.previewIfNeeded(entry.ref) }
+        }
     }
 
     /// Tinted name chip marking which device a row belongs to.

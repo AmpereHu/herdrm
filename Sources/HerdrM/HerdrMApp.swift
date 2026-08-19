@@ -33,6 +33,13 @@ struct HerdrMApp: App {
                     updaterController.checkForUpdates(nil)
                 }
             }
+            CommandMenu("Go") {
+                // Plain arrows belong to the TUI, which holds keyboard focus.
+                Button("Next Agent") { model.selectAdjacentAgent(1) }
+                    .keyboardShortcut(.downArrow, modifiers: [.command, .option])
+                Button("Previous Agent") { model.selectAdjacentAgent(-1) }
+                    .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+            }
             CommandGroup(after: .newItem) {
                 Button("New Agent…") { model.showNewAgent = true }
                     .keyboardShortcut("n", modifiers: .command)

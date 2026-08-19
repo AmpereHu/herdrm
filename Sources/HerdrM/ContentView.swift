@@ -44,6 +44,14 @@ struct RootView: View {
                 .keyboardShortcut("b", modifiers: .command)
                 .hidden()
         )
+        .background {
+            // ⌘1…⌘9 jump straight to the nth agent in the sidebar.
+            ForEach(1...9, id: \.self) { index in
+                Button("") { model.selectAgent(at: index - 1) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index)")), modifiers: .command)
+                    .hidden()
+            }
+        }
         .sheet(isPresented: $model.showSearch) { SearchSheet(model: model) }
         .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 980, minHeight: 620)
@@ -142,6 +150,24 @@ struct DetailView: View {
                     DeviceChip(device: entry.device)
                 }
                 statusPill(agent.status)
+            } else if let shell = model.selectedShell {
+                Image(systemName: "terminal")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textTertiary)
+                Text(shell.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                    .help((shell.pane.cwd as NSString?)?.abbreviatingWithTildeInPath ?? "")
+                Spacer(minLength: 12)
+                Text(model.spaceName(deviceID: shell.device.id, workspaceID: shell.pane.workspaceID))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1)
+                if model.showsDeviceBadges {
+                    DeviceChip(device: shell.device)
+                }
             } else {
                 Text("No agent selected")
                     .font(.system(size: 13, weight: .medium))
@@ -201,10 +227,10 @@ struct DetailView: View {
 
     @ViewBuilder
     private var terminal: some View {
-        if let entry = model.selectedEntry {
+        if let target = model.selectedTerminal {
             AttachTerminalView(
-                device: entry.device,
-                ref: entry.ref,
+                device: target.device,
+                ref: target.ref,
                 fontName: terminalFontName,
                 fontSize: terminalFontSize,
                 dark: colorScheme == .dark,
@@ -215,8 +241,8 @@ struct DetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Theme.terminalBackground)
                 .overlay {
-                    if terminals.isDisconnected(entry.ref) {
-                        disconnectedOverlay(entry)
+                    if terminals.isDisconnected(target.ref) {
+                        disconnectedOverlay(target)
                     }
                 }
         } else {
@@ -241,7 +267,7 @@ struct DetailView: View {
 
     /// Shown when the attach process exits — a dropped SSH link, a closed pane, or
     /// herdr going away. Without it the terminal would just freeze with no explanation.
-    private func disconnectedOverlay(_ entry: AppModel.AgentEntry) -> some View {
+    private func disconnectedOverlay(_ target: AppModel.TerminalTarget) -> some View {
         VStack(spacing: 9) {
             Image(systemName: "bolt.horizontal.circle")
                 .font(.system(size: 24, weight: .light))
@@ -249,11 +275,11 @@ struct DetailView: View {
             Text("Terminal disconnected")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Theme.text)
-            Text("The attach session for \(entry.agent.title) ended.")
+            Text("The attach session for \(target.title) ended.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(Theme.textTertiary)
             Button("Reconnect") {
-                terminals.reconnect(entry.ref, device: entry.device)
+                terminals.reconnect(target.ref, device: target.device)
             }
             .controlSize(.small)
         }
@@ -518,8 +544,9 @@ struct NewAgentSheet: View {
                     }
                     .labelsHidden()
                     .fixedSize()
-                    .onChange(of: deviceID) { _, _ in
+                    .onChange(of: deviceID) { _, newValue in
                         workspaceID = ""
+                        model.refreshInstalledAgents(newValue)
                         if !kinds.contains(kind) { kind = kinds.first ?? "claude" }
                     }
 
@@ -604,6 +631,8 @@ struct NewAgentSheet: View {
             workspaceID = model.selectedSpace?.deviceID == deviceID
                 ? (model.selectedSpace?.workspaceID ?? "")
                 : ""
+            // A CLI installed since the last connect should show up without a restart.
+            model.refreshInstalledAgents(deviceID)
             if !kinds.contains(kind) { kind = kinds.first ?? "claude" }
         }
     }

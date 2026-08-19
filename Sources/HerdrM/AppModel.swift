@@ -65,6 +65,12 @@ final class AppModel: ObservableObject {
     private var sessionTasks: [UUID: Task<Void, Never>] = [:]
     private var refreshDebounces: [UUID: Task<Void, Never>] = [:]
     private var previousStatuses: [UUID: [String: AgentStatus]] = [:]
+    private var kindProbes: [UUID: Task<Void, Never>] = [:]
+    private var previewTasks: [PaneRef: Task<Void, Never>] = [:]
+    private var previewFetchedAt: [PaneRef: Date] = [:]
+
+    /// Last line or two of each pane's output, for sidebar tooltips. Populated on hover.
+    @Published private(set) var previews: [PaneRef: String] = [:]
 
     init() {
         devices = DeviceStore().load()
@@ -118,6 +124,26 @@ final class AppModel: ObservableObject {
         var ref: SpaceRef { SpaceRef(deviceID: device.id, workspaceID: workspace.workspaceID) }
     }
 
+    /// A pane with no agent in it — a plain shell herdr is hosting.
+    struct PaneEntry: Identifiable {
+        let device: Device
+        let pane: PaneInfo
+
+        var id: String { "\(device.id.uuidString)-\(pane.paneID)" }
+        var ref: PaneRef { PaneRef(deviceID: device.id, paneID: pane.paneID) }
+        var title: String {
+            let name = pane.terminalTitle?.trimmingCharacters(in: .whitespaces)
+            return (name?.isEmpty ?? true) ? "Terminal \(pane.paneID)" : name!
+        }
+    }
+
+    /// What the detail pane is attached to, agent or shell.
+    struct TerminalTarget {
+        let device: Device
+        let ref: PaneRef
+        let title: String
+    }
+
     var visibleSpaces: [SpaceEntry] {
         devicesInScope.flatMap { device in
             session(device.id).workspaces.map { SpaceEntry(device: device, workspace: $0) }
@@ -135,6 +161,44 @@ final class AppModel: ObservableObject {
             }
         }
         return entries.sorted { ConsoleLogic.sortsBefore($0.agent.orderKey, $1.agent.orderKey) }
+    }
+
+    /// Shell panes in scope: everything herdr reports that has no agent running in it,
+    /// and that is not already listed as an agent row.
+    var visibleShellPanes: [PaneEntry] {
+        var entries = devicesInScope.flatMap { device -> [PaneEntry] in
+            let agentPanes = Set(session(device.id).agents.map(\.paneID))
+            return session(device.id).panes
+                .filter { !$0.hasAgent && !agentPanes.contains($0.paneID) }
+                .map { PaneEntry(device: device, pane: $0) }
+        }
+        if let space = selectedSpace {
+            entries = entries.filter {
+                $0.device.id == space.deviceID && $0.pane.workspaceID == space.workspaceID
+            }
+        }
+        return entries.sorted { $0.pane.paneID < $1.pane.paneID }
+    }
+
+    /// The selected pane when it is a shell rather than an agent.
+    var selectedShell: PaneEntry? {
+        guard let selected = selectedPane, selectedEntry == nil,
+              let device = device(selected.deviceID),
+              let pane = session(selected.deviceID).panes.first(where: { $0.paneID == selected.paneID }),
+              !pane.hasAgent
+        else { return nil }
+        return PaneEntry(device: device, pane: pane)
+    }
+
+    /// One accessor for the embedded terminal, whichever kind of pane is selected.
+    var selectedTerminal: TerminalTarget? {
+        if let entry = selectedEntry {
+            return TerminalTarget(device: entry.device, ref: entry.ref, title: entry.agent.title)
+        }
+        if let shell = selectedShell {
+            return TerminalTarget(device: shell.device, ref: shell.ref, title: shell.title)
+        }
+        return nil
     }
 
     var scopeAgentCount: Int {
@@ -170,6 +234,28 @@ final class AppModel: ObservableObject {
             if entry.device.id == ref!.deviceID && entry.agent.workspaceID == ref!.workspaceID { return }
         }
         selectedPane = visibleAgents.first?.ref
+    }
+
+    /// ⌥⌘↓ / ⌥⌘↑ — cycles the visible agent list. Plain arrows belong to the TUI, which
+    /// holds keyboard focus, so navigation has to be modified.
+    func selectAdjacentAgent(_ offset: Int) {
+        let agents = visibleAgents
+        guard !agents.isEmpty else { return }
+        guard let current = selectedPane,
+              let index = agents.firstIndex(where: { $0.ref == current })
+        else {
+            selectedPane = agents.first?.ref
+            return
+        }
+        let count = agents.count
+        selectedPane = agents[((index + offset) % count + count) % count].ref
+    }
+
+    /// ⌘1…⌘9 — jumps straight to the nth visible agent.
+    func selectAgent(at index: Int) {
+        let agents = visibleAgents
+        guard agents.indices.contains(index) else { return }
+        selectedPane = agents[index].ref
     }
 
     func setDeviceFilter(_ id: UUID?) {
@@ -295,12 +381,7 @@ final class AppModel: ObservableObject {
                         self.probeOSIfNeeded(current)
                     }
                     try await self.refreshOrThrow(device.id)
-                    if self.sessions[device.id]?.agentKinds.isEmpty ?? true {
-                        let kinds = (try? await service.agentKinds()) ?? []
-                        self.sessions[device.id]?.agentKinds = kinds
-                        self.sessions[device.id]?.installedAgentKinds =
-                            (try? await service.installedAgentKinds(from: kinds)) ?? []
-                    }
+                    self.refreshInstalledAgents(device.id)
                     let stream = try await service.events()
                     for try await _ in stream {
                         self.scheduleRefresh(device.id)
@@ -361,6 +442,59 @@ final class AppModel: ObservableObject {
         if selectedPane?.deviceID == device.id { selectedPane = visibleAgents.first?.ref }
     }
 
+    // MARK: - Installed agent CLIs
+
+    /// Re-sniffs which agent CLIs exist on a device.
+    ///
+    /// Runs on every successful connect and whenever the New Agent sheet opens, rather
+    /// than once per launch: installing a new CLI on a remote box used to mean restarting
+    /// the app before it showed up in the picker.
+    func refreshInstalledAgents(_ deviceID: UUID) {
+        guard let device = device(deviceID) else { return }
+        kindProbes[deviceID]?.cancel()
+        kindProbes[deviceID] = Task { [weak self] in
+            guard let self else { return }
+            let service = self.service(for: device)
+            var kinds = self.session(deviceID).agentKinds
+            if kinds.isEmpty {
+                kinds = (try? await service.agentKinds()) ?? []
+            }
+            guard !Task.isCancelled, !kinds.isEmpty else { return }
+            self.sessions[deviceID]?.agentKinds = kinds
+            let installed = (try? await service.installedAgentKinds(from: kinds)) ?? []
+            guard !Task.isCancelled, !installed.isEmpty else { return }
+            self.sessions[deviceID]?.installedAgentKinds = installed
+        }
+    }
+
+    // MARK: - Pane previews
+
+    private static let previewMaxAge: TimeInterval = 5
+
+    /// Reads the tail of a pane so the sidebar can show what the agent is actually doing.
+    /// Cheap enough to run on hover, and rate-limited so a slow drag across the list does
+    /// not turn into a burst of reads.
+    func previewIfNeeded(_ ref: PaneRef) {
+        guard let device = device(ref.deviceID) else { return }
+        if let fetched = previewFetchedAt[ref], Date().timeIntervalSince(fetched) < Self.previewMaxAge {
+            return
+        }
+        previewFetchedAt[ref] = Date()
+        previewTasks[ref]?.cancel()
+        previewTasks[ref] = Task { [weak self] in
+            guard let self else { return }
+            guard let read = try? await self.service(for: device).readPane(paneID: ref.paneID) else { return }
+            guard !Task.isCancelled else { return }
+            if let tail = TerminalText.tail(read.text, lines: 3, limit: 220) {
+                self.previews[ref] = tail
+            }
+        }
+    }
+
+    func preview(for ref: PaneRef) -> String? {
+        previews[ref]
+    }
+
     // MARK: - Refresh
 
     /// Snapshot refresh that reports failure to its caller.
@@ -380,8 +514,10 @@ final class AppModel: ObservableObject {
         sessions[deviceID]?.workspaces = snapshot.workspaces
         sessions[deviceID]?.panes = snapshot.panes ?? []
         TerminalSessionStore.shared.prune(keeping: livePaneRefs)
+        let known = Set(snapshot.agents.map(\.paneID))
+            .union((snapshot.panes ?? []).map(\.paneID))
         if let selected = selectedPane, selected.deviceID == deviceID,
-           !snapshot.agents.contains(where: { $0.paneID == selected.paneID }) {
+           !known.contains(selected.paneID) {
             selectedPane = nil
         }
         if let space = selectedSpace, space.deviceID == deviceID,
@@ -411,6 +547,9 @@ final class AppModel: ObservableObject {
         for device in devices {
             for agent in session(device.id).agents {
                 refs.insert(PaneRef(deviceID: device.id, paneID: agent.paneID))
+            }
+            for pane in session(device.id).panes {
+                refs.insert(PaneRef(deviceID: device.id, paneID: pane.paneID))
             }
         }
         return refs

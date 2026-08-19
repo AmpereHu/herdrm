@@ -22,23 +22,21 @@ struct SearchSheet: View {
     }
 
     private var results: [Result] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         let agents = model.devices.flatMap { device in
             model.session(device.id).agents.map { AppModel.AgentEntry(device: device, agent: $0) }
         }.filter { entry in
-            q.isEmpty
-                || entry.agent.title.lowercased().contains(q)
-                || entry.agent.agent.lowercased().contains(q)
-                || entry.device.name.lowercased().contains(q)
-                || model.spaceName(deviceID: entry.device.id, workspaceID: entry.agent.workspaceID)
-                    .lowercased().contains(q)
+            ConsoleLogic.matches(query: query, fields: [
+                entry.agent.title,
+                entry.agent.agent,
+                entry.device.name,
+                model.spaceName(deviceID: entry.device.id, workspaceID: entry.agent.workspaceID),
+                entry.agent.cwd,
+            ])
         }
         let spaces = model.devices.flatMap { device in
             model.session(device.id).workspaces.map { AppModel.SpaceEntry(device: device, workspace: $0) }
         }.filter { entry in
-            q.isEmpty
-                || entry.workspace.label.lowercased().contains(q)
-                || entry.device.name.lowercased().contains(q)
+            ConsoleLogic.matches(query: query, fields: [entry.workspace.label, entry.device.name])
         }
         return agents.map(Result.agent) + spaces.map(Result.space)
     }
